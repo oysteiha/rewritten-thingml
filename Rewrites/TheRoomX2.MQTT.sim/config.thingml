@@ -1,0 +1,17 @@
+import "psm.thingml"
+import "pim.thingml"
+
+configuration X2_MQTT_SIM {
+	instance T1:MQTTDriver
+	instance pim:PIM
+
+	// PSM
+	connector T1.to_pim => pim.from_psm
+			
+	// PIM outwards 
+	connector pim.to_psm => T1.from_pim
+	
+	// Simulation
+	connector T1.MQTT over MQTT
+
+}

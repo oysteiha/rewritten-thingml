@@ -1,0 +1,72 @@
+/* ThingML Framework */
+
+import "pim_messages.thingml"
+
+thing PIM includes GeneralMsg, TemperatureMsg, OnOffMsg {
+	required port to_psm {
+		sends add_thermometer, add_device, SwitchOn, SwitchOff
+	}
+	provided port from_psm {
+		receives set_temperature, temperature, heatOn, heatOff
+	}
+
+	
+	property tmrature:Double = 20 // the requested temperature for the room
+	property thermo_id:Integer = 1 // the single thermometer identifier
+	property switch_id:Integer = 1 // the single on-off switch identifier
+	
+	statechart PIM_behavior init SetThermostat {
+		on entry do
+			print("Running The Room X2.MQTT.sim")
+		end
+		state SetThermostat {
+			transition -> SetThermostat
+			event from_psm?temperature
+			action do
+				// just discard, the thermostat is not running, yet (161103)
+			end
+			transition -> Thermostat
+			event set_temp:from_psm?set_temperature
+			action do
+				tmrature = set_temp.t
+				to_psm!add_thermometer(thermo_id,"t") // We have only one thermometer in this system
+				to_psm!add_device(switch_id) // We have only one switch device in this system
+				println("Now entering thermostat. Please give temperature measurements") // SIMULATION: prompting on console for the user to react properly
+			end
+		}
+		state Thermostat {
+			transition -> Thermostat
+			event temp:from_psm?temperature
+			action do
+				if (temp.t<tmrature-1) do
+					to_psm!SwitchOn(switch_id)
+				end
+				if (temp.t>tmrature+1) do
+					to_psm!SwitchOff(switch_id)
+				end
+			end
+			transition -> On
+			event swon:from_psm?heatOn
+			action do
+				to_psm!SwitchOn(swon.did)
+			end 
+		}
+		
+		state On {
+			transition -> Off
+			event swoff:from_psm?heatOff
+			action do
+				to_psm!SwitchOff(swoff.did)
+			end 
+		}
+		state Off {
+			transition -> Thermostat
+			event set_temp:from_psm?set_temperature
+			action do
+				tmrature = set_temp.t
+			end
+			
+		}
+	}
+}
+
