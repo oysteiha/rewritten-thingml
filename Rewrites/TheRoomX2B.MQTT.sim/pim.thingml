@@ -1,0 +1,128 @@
+/* ThingML Framework */
+
+import "pim_messages.thingml"
+
+thing PIM includes GeneralMsg, TemperatureMsg, OnOffMsg {
+	required port to_psm {
+		sends add_thermometer, add_device, SwitchOn, SwitchOff, prompt
+	}
+	provided port from_psm {
+		receives heatOn, heatOff, set_temperature, set_delta, temperature, fetch_temp
+	}
+	
+	property tmrature:Double = 20 // the requested temperature for the room
+	property thermo_id:Integer = 1 // the single thermometer identifier
+	property switch_id:Integer = 1 // the single on-off switch identifier
+	property delta:Double = 0.10 // the maximum allowed difference from the comfort temperature	
+	property lasttemp:Double = 0 // the last temperature recorded, buffering one measurement
+	
+	statechart PIM_behavior init SetThermostat {
+		on entry do
+			print("Running The Room X2B.MQTT.sim")
+		end
+		state SetThermostat {
+			transition -> SetThermostat
+			event from_psm?temperature
+			action do
+				// just discard, the thermostat is not running, yet (161103)
+			end
+			transition -> Running
+			event set_temp:from_psm?set_temperature
+			action do
+				tmrature = set_temp.t
+				to_psm!add_thermometer(thermo_id,"t") // We have only one thermometer in this system
+				to_psm!add_device(switch_id) // We have only one switch device in this system
+				to_psm!prompt("Now entering thermostat. Please give temperature measurements") // SIMULATION: prompting on console for the user to react properly
+			end
+		}
+		
+		composite state Running init Thermostat keeps history {
+		
+			state Thermostat {
+				transition -> Thermostat
+				event temp:from_psm?temperature
+				action do
+					if (temp.t<tmrature-delta) do
+						to_psm!SwitchOn(switch_id)
+						lasttemp = temp.t
+					end
+					if (temp.t>tmrature+delta) do
+						to_psm!SwitchOff(switch_id)
+						lasttemp = temp.t
+					end
+				end
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end 
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end
+			}
+			
+			state On {
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end
+			}
+			state Off {
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end			
+			}
+			
+			// Now the parameters that should not change the innermost state
+			transition -> Running
+			event givedelta:from_psm?set_delta
+			action do
+				// just forward the polling interval instructions to the PSM
+				delta = givedelta.dlta
+			end
+			transition -> Running
+			event fetch:from_psm?fetch_temp
+			action do
+				// reporting the temperature value
+				to_psm!prompt("Temperature: " + lasttemp)
+			end
+			transition -> Running
+			event temp:from_psm?temperature
+			action do
+				lasttemp = temp.t
+			end
+		
+		}
+	}
+}
+
