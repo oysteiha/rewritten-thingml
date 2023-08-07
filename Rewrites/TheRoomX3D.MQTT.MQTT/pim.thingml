@@ -1,0 +1,370 @@
+/* ThingML Framework */
+
+import "pim_messages.thingml"
+import "timer.thingml"
+
+
+thing PIM includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs, LuminanceMsg, MotionMsg {
+	required port to_psm {
+		sends add_thermometer, add_device, SwitchOn, SwitchOff, prompt
+	}
+	provided port from_psm {
+		receives heatOn, heatOff, set_temperature, set_delta, temperature, fetch_temp, set_day_start, set_night_start, set_luminance
+	}
+
+	required port to_EnergySaving {
+		sends set_temperature, set_day_start, set_night_start
+	}
+
+	provided port from_EnergySaving { receives set_temperature }
+
+	//timer ports - it does not hold to include TimerClient since it only has one port and therefore cannot distinguish between two timers
+	required port guard_temperature
+    {
+		receives timer_timeout
+		sends timer_start, timer_cancel
+	}
+    
+	required port guard_human
+    {
+		receives timer_timeout
+		sends timer_start, timer_cancel
+	}
+
+	property tmrature:Double = 20 // the requested temperature for the room
+	property thermo_id:Integer = 1 // the single thermometer identifier
+	property switch_id:Integer = 1 // the single on-off switch identifier
+	property delta:Float = 0.1 
+	property lasttemp:Double = 0 // the last temperature recorded, buffering one measurement
+	
+	property current_temp:Double = 0 // the last temperature recorded, buffering one measurement
+	property current_average_diff:Double = 0
+	//property warming_time:Double = 10
+	//property cooling_time:Double = 10
+	property buffer_size:Integer = 10
+	property temp_buffer:Double[10]
+	property buffer_rear:Integer = 0
+	property buffer_front:Integer = 0
+	property night_start:Long = 23*60*60*1000 // 11PM is default night time
+	property day_start:Long = 7*60*60*1000 // 7AM is default day start time
+
+	statechart PIM_behavior init Build {
+		on entry do
+			println("Running The Room X3.MQTT.MQTT")
+		end
+		composite state Build init SetThermostat keeps history {
+		on entry guard_human!timer_start(30000) // 30s to start the thermostat 
+		on exit guard_human!timer_cancel()
+			state SetThermostat {
+				on entry do
+					to_psm!add_thermometer(thermo_id,"t") // We have only one thermometer in this system
+					to_psm!add_device(switch_id) // We have only one switch device in this system
+				end
+				transition -> SetThermostat
+				event from_psm?heatOn
+				action do
+					to_psm!prompt("Please set temperature for Thermostat")
+				end			
+				transition -> SetThermostat
+				event from_psm?heatOff
+				action do
+					to_psm!prompt("Please set temperature for Thermostat")
+				end	
+				
+			}
+			// Normal transition to the Running state
+			transition -> Running
+			event set_temp:from_psm?set_temperature
+			action do
+				to_EnergySaving!set_temperature(set_temp.t) // SIMULATION: prompting on console for the user to react properly
+				to_EnergySaving!set_day_start(day_start)
+				to_EnergySaving!set_night_start(night_start)
+			end
+
+			// Normal transition to the Running state
+			transition -> Running
+			event set_temp:from_EnergySaving?set_temperature
+			action do
+				tmrature = set_temp.t
+				to_psm!prompt("Now entering thermostat. Please give temperature observations") // SIMULATION: prompting on console for the user to react properly
+			end
+
+			//Escape situations
+
+			internal event givedelta:from_psm?set_delta
+			action do
+				delta = givedelta.dlta
+			end
+
+			internal event temp:from_psm?temperature
+			action do 
+				current_temp = temp.t
+				buffer_rear = (buffer_rear + 1) % buffer_size
+				if(buffer_rear == buffer_front) do
+					buffer_front = (buffer_front + 1) % buffer_size
+				end
+				lasttemp = temp_buffer[buffer_rear]
+			end
+
+			transition -> Build
+			event tmout:guard_human?timer_timeout
+			action do
+				to_psm!prompt("Please continue doing the build of the temperature control")
+			end
+			
+		} 
+		composite state Running init Thermostat keeps history{
+			composite state Thermostat init TemprDecide{
+			state TemprDecide {
+				transition -> TemprDecrease
+				guard lasttemp>=tmrature-delta  // We choose switch OFF as much as we can here
+				action do
+					to_psm!SwitchOff(switch_id)
+				end
+				
+				transition -> TemprIncrease
+				guard lasttemp < tmrature-delta
+				action do
+					to_psm!SwitchOn(switch_id)
+				end
+				}
+			state TemprIncrease{ // Invariant: Switch is ON and temperature should increase
+				on entry guard_temperature!timer_start(65000)
+				on exit guard_temperature!timer_cancel()
+				
+					transition -> TemprIncrease 
+					event temp:from_psm?temperature
+					guard temp.t<=tmrature+delta
+					action do
+						if (lasttemp>temp.t) to_psm!SwitchOn(switch_id) // the temperature is still falling even though switch should be ON, reactivate
+						current_temp = temp.t
+						temp_buffer[buffer_rear] = temp.t
+						current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)
+						println(temp.t)
+						
+						buffer_rear = (buffer_rear + 1) % buffer_size
+						if(buffer_rear == buffer_front) do
+							buffer_front = (buffer_front + 1) % buffer_size
+						end
+						lasttemp = temp_buffer[buffer_rear]
+					end
+					
+					transition -> TemprDecrease
+					event temp2:from_psm?temperature
+					guard temp2.t>tmrature+delta
+					action do
+						to_psm!SwitchOff(switch_id)
+						temp_buffer[buffer_rear] = temp2.t
+						current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)
+						buffer_rear = (buffer_rear + 1) % buffer_size
+						if(buffer_rear == buffer_front) do
+							buffer_front = (buffer_front + 1) % buffer_size
+						end
+						lasttemp = temp_buffer[buffer_rear]
+					end
+					
+					transition -> TemprIncrease
+					event timout:guard_temperature?timer_timeout
+					action do
+						to_psm!prompt("WARNING: @TemprIncrease - temperature measurement is delayed")						
+					end
+					
+					// Now the parameters that should not change the innermost state
+					transition -> TemprIncrease
+					event givedelta:from_psm?set_delta
+					action do
+						delta = givedelta.dlta
+					end
+
+					internal event fetch:from_psm?fetch_temp
+					action do
+						// reporting the temperature value
+						to_psm!prompt("Last temperature: "+lasttemp)
+					end
+					
+				}
+
+				state TemprDecrease{ // Invariant: Switch is OFF and temperature should decrease
+				on entry guard_temperature!timer_start(65000) 
+				on exit guard_temperature!timer_cancel()
+				
+					transition-> TemprDecrease
+					event temp:from_psm?temperature
+					guard temp.t>=tmrature-delta
+					action do
+						// TRACING to follow thermostat print("TempDecrease: Observed=") print(temp.t) print(" Desired ") print(tmrature) print("\n") 
+						if (lasttemp<temp.t) to_psm!SwitchOff(switch_id) // the temperature is still rising even though switch should be OFF, reactivate	
+						current_temp = temp.t
+						temp_buffer[buffer_rear] = temp.t
+						current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)						
+						buffer_rear = (buffer_rear + 1) % buffer_size
+						if(buffer_rear == buffer_front) do
+							buffer_front = (buffer_front + 1) % buffer_size
+						end
+						lasttemp = temp_buffer[buffer_rear]
+					end
+
+					transition -> TemprIncrease
+					event temp2:from_psm?temperature
+					guard temp2.t<tmrature-delta
+					action do
+						to_psm!SwitchOn(switch_id)
+						current_temp = temp2.t
+						temp_buffer[buffer_rear] = temp2.t
+						lasttemp = temp_buffer[buffer_rear]
+						current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)
+						
+						
+						buffer_rear = (buffer_rear + 1) % buffer_size
+						if(buffer_rear == buffer_front) do
+							buffer_front = (buffer_front + 1) % buffer_size
+						end
+					end
+					
+					transition -> TemprDecrease
+					event timout:guard_temperature?timer_timeout
+					action do
+						to_psm!prompt("WARNING: @TemprDecrease - temperature measurement is delayed")
+					end
+
+					// Now the parameters that should not change the innermost state
+					transition -> TemprIncrease
+					event givedelta:from_psm?set_delta
+					action do
+						// just forward the polling interval instructions to the PSM
+						delta = givedelta.dlta
+					end
+					
+
+				}
+
+				
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end 
+				transition -> Off
+				event swoff:from_psm?heatOff 
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end
+			}
+			 // end Thermostat
+			
+			state On {
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end
+				transition -> On
+				event temp:from_psm?temperature
+				action do
+					if (lasttemp>temp.t) to_psm!SwitchOn(switch_id) // temperature is falling even when ON. Reactivate.
+					current_temp = temp.t
+					temp_buffer[buffer_rear] = temp.t
+					current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)			
+					buffer_rear = (buffer_rear + 1) % buffer_size
+					
+					if(buffer_rear == buffer_front) do
+						buffer_front = (buffer_front + 1) % buffer_size
+					end
+					
+					lasttemp = temp_buffer[buffer_rear]
+
+				end
+			}
+			state Off {
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end	
+				transition -> Off
+				event temp:from_psm?temperature
+				action do
+					if (lasttemp<temp.t) to_psm!SwitchOff(switch_id) // temperature is rising even when OFF. Reactivate.
+					current_temp = temp.t
+					temp_buffer[buffer_rear] = temp.t
+					current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)			
+					buffer_rear = (buffer_rear + 1) % buffer_size
+					if(buffer_rear == buffer_front) do
+						buffer_front = (buffer_front + 1) % buffer_size
+					end
+					lasttemp = temp_buffer[buffer_rear]
+				end
+			}
+			
+			// Transitions of the composite state Running
+			internal event givedelta:from_psm?set_delta
+			action do
+				// just forward the polling interval instructions to the PSM
+				delta = givedelta.dlta
+			end
+			internal event fetch:from_psm?fetch_temp
+			action do
+				// reporting the temperature value
+				to_psm!prompt("Last temperature: "+lasttemp)
+			end
+			
+			
+			// Messages that should not occur, but may occur
+			// Messages the cannot occur - since they are always handled
+			transition -> Running
+			event from_psm?heatOn
+			action do
+				to_psm!prompt("INTERNAL ERROR: Impossible SwitchOn at PIM.Running")
+			end		
+			transition -> Running
+			event from_psm?heatOff
+			action do
+				to_psm!prompt("INTERNAL ERROR: Impossible SwitchOff at PIM.Running")
+			end		
+			transition -> Running
+			event from_psm?set_temperature
+			action do
+				to_psm!prompt("INTERNAL ERROR: Impossible set_temperature at PIM.Running")
+			end		
+			transition -> Running
+			event temp:from_psm?temperature
+			action do
+				to_psm!prompt("INTERNAL ERROR: temperature received at PIM.Running")
+				current_temp = temp.t
+				temp_buffer[buffer_rear] = temp.t
+				current_average_diff = (temp_buffer[buffer_rear]-temp_buffer[buffer_front])/(buffer_size -1)
+				buffer_rear = (buffer_rear + 1) % buffer_size
+				if(buffer_rear == buffer_front) do
+					buffer_front = (buffer_front + 1) % buffer_size
+				end
+				lasttemp = temp_buffer[buffer_rear]
+			end
+		} // end Running
+	} // end PIM_behavior
+} // end PIM thing
+
