@@ -5,6 +5,8 @@ import "datatypes.thingml" from stl
 // General
 thing fragment GeneralMsg {
 	message prompt(txt:String) // meant to send a textual message out to the user
+    message heatOn(did:Integer) // Human turns on heat permanently
+	message heatOff(did:Integer) // Human turns off heat permanently
 }
 
 //Temperature

@@ -8,21 +8,21 @@
 import "datatypes.thingml" from stl	
 import "pim_messages.thingml"
 
-/*
+
 protocol MQTT @serializer "JSON"
   @mqtt_broker_address "localhost"
   @mqtt_broker_port "1883" 
   @mqtt_publish_topic "CPS2021/SwitchControl"
   @mqtt_subscribe_topic "CPS2021/tempoutput";
- */
+ 
 
 thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
-	required port provide_temp {sends temperature}
-	provided port require_val {receives add_thermometer, add_device, SwitchOn, SwitchOff}
+	required port to_pim {sends heatOn, heatOff, set_temperature, set_delta, temperature, fetch_temp}
+	provided port from_pim {receives add_thermometer, add_device, SwitchOn, SwitchOff, prompt}
 	
 	//Only one MQTT port to receive the sensor values
 	provided port MQTT {
-		receives temperature
+		receives temperature, heatOn, heatOff, set_temperature, set_delta, fetch_temp
 		sends SwitchOn,SwitchOff
 	}
 
@@ -64,12 +64,12 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				end
 				if (found) do
 					thermoval[i-1]=put_t.t
-					provide_temp!temperature(id_s,thermotext[i],put_t.t)				
+					to_pim!temperature(id_s,thermotext[i],put_t.t)				
 				end
 			end
 						
 			transition -> Idle
-			event addt:require_val?add_thermometer
+			event addt:from_pim?add_thermometer
 			action do				
 				id_s=addt.id
 				thermometers[last_thermo]=id_s
@@ -79,7 +79,7 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 			end
 			
 			transition -> Idle
-			event add_dev: require_val?add_device
+			event add_dev: from_pim?add_device
 			action do
 				did=add_dev.did
 				
@@ -87,7 +87,7 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				last_onoff = last_onoff+1
 			end
 			transition -> Idle
-			event swon: require_val?SwitchOn
+			event swon: from_pim?SwitchOn
 			action do
 				did=swon.did
 				i=0
@@ -103,7 +103,7 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				end
 			end
 			transition -> Idle
-			event swoff: require_val?SwitchOff
+			event swoff: from_pim?SwitchOff
 			action do
 				did=swoff.did
 				i=0
@@ -117,7 +117,59 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				if (found) do
 					MQTT!SwitchOff(did)
 				end
-			end			
+			end	
+			transition -> Idle
+			event hon: MQTT?heatOn
+			action do
+				did=hon.did
+				i=0
+				found = false
+				while (i<last_onoff and (not found)) do
+					if (did==onoffswitches[i]) do
+						found=true // trick to terminate while loop
+					end
+					i=i+1
+				end
+				if (found) do
+					to_pim!heatOn(did)
+				end
+			end
+			transition -> Idle
+			event hoff: MQTT?heatOff
+			action do
+				did=hoff.did
+				i=0
+				found = false
+				while (i<last_onoff and (not found)) do
+					if (did==onoffswitches[i]) do
+						found=true // trick to terminate while loop
+					end
+					i=i+1
+				end
+				if (found) do
+					to_pim!heatOff(did)
+				end
+			end	
+			transition -> Idle
+			event pr: from_pim?prompt
+			action do
+				println(pr.txt)
+			end		
+			transition -> Idle
+			event st: MQTT?set_temperature
+			action do
+				to_pim!set_temperature(st.t)
+			end		
+			transition -> Idle
+			event givdlt: MQTT?set_delta
+			action do
+				to_pim!set_delta(givdlt.dlta)
+			end		
+			transition -> Idle
+			event ft: MQTT?fetch_temp
+			action do
+				to_pim!fetch_temp()
+			end		
 		}
 	}
 } // MQTTDriver
