@@ -1,0 +1,349 @@
+/* X5 is based on X3D introducing dynamic sessions*/
+/* This version simulates one controller for any number of rooms each consisting of one thermometer and one actuator */
+/* For simplicity the two guarding timers have been omitted */
+
+// Base datatypes
+import "datatypes.thingml" from stl
+
+/* PSM must be included */
+import "psm.thingml"
+import "pim_messages.thingml"
+import "timer.thingml"
+
+thing PIM includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
+	provided port get_sensor {
+		receives iamalive1,iamalive2, temperature
+	}
+	required port request_sensor {
+		sends iamalive1, iamalive2, add_thermometer
+	}
+	required port request_actuator{
+		sends add_device, SwitchOn, SwitchOff
+	}
+	provided port human_input {
+		receives SwitchOn, SwitchOff, set_temperature,  set_delta, fetch_temp, add_room
+	}
+	required port human_output {
+		sends temperature, prompt
+	}
+		
+	property tmrature:Double = 20 // the requested temperature for the room
+	property thermo_id:Integer = 0 // the thermometer identifier
+	property switch_id:Integer = 0 // the on-off switch identifier
+	property delta:Double = 0.10 // the maximum allowed difference from the comfort temperature
+	
+	property lasttemp:Double = 0 // the last temperature recorded, buffering one measurement
+	
+	statechart PIM_behavior init Alive1 {
+		on entry do
+			print("Running The Room X5.MQTT.sim\n")
+		end
+
+		state Alive1 {
+			on entry do
+				request_sensor!iamalive1() // making sure that all processes are alive before starting
+			end
+			transition -> Alive2
+			event alv:get_sensor?iamalive1
+			action do
+				request_sensor!iamalive2()
+			end				
+			transition -> SetThermostat
+			event alv:get_sensor?iamalive2
+			action do
+				request_sensor!iamalive2()
+			end				
+		}	
+		state Alive2{
+			transition -> SetThermostat	
+			event alv:get_sensor?iamalive2 // must receive iamalive from PSM::MQTTDriver before building
+		}
+		
+		//Escape situations
+		internal event givedelta:human_input?set_delta
+		guard givedelta.rid == 0
+		action do
+			delta = givedelta.dlta
+		end
+		internal event fetch:human_input?fetch_temp
+		guard fetch.rid == 0
+		action do
+			// reporting the temperature value
+			human_output!prompt("fetch_temp: no rooms added, yet")
+		end
+		internal event temp:get_sensor?temperature
+		guard temp.id == 0
+		action do
+			// reporting the temperature value
+			human_output!prompt("temperature: no rooms added, yet")
+		end
+		internal event get_sensor?iamalive1
+		action do 
+			human_output!prompt("INTERNAL ERROR: iamalive1 is covered inside Alive1")
+		end
+		internal event get_sensor?iamalive2
+		action do 
+			human_output!prompt("INTERNAL ERROR: iamalive2 is covered inside Alive2 or Alive1")
+		end
+			
+		state SetThermostat {
+			// This is the state of the PIM root session for forking new rooms
+			transition -> SetThermostat
+			event addr:human_input?add_room
+			action do
+				thermo_id = thermo_id+1
+				switch_id = switch_id+1
+				human_output!prompt("Room named "+addr.rname+" is number " + thermo_id)
+				fork new_room
+			end
+			transition -> SetThermostat
+			event son:human_input?SwitchOn
+			guard son.did == 0
+			action do
+				human_output!prompt("Please add room")
+			end			
+			transition -> SetThermostat
+			event soff:human_input?SwitchOff
+			guard soff.did == 0
+			action do
+				human_output!prompt("Please add room")
+			end			
+		}
+		
+		
+		session new_room init RoomInit {
+			state RoomInit {
+				on entry do
+					request_sensor!add_thermometer(thermo_id,"t") // We have only one thermometer in this system
+					request_actuator!add_device(switch_id) // We have only one switch device in this system
+				end
+				// Normal transition to the Running state
+				transition -> Running
+				event set_temp:human_input?set_temperature
+				guard set_temp.rid==thermo_id
+				action do
+					tmrature = set_temp.t
+					human_output!prompt("Now entering thermostat #"+thermo_id) // SIMULATION: prompting on console for the user to react properly
+				end
+			}	
+		
+			composite state Running init Thermostat keeps history {
+			
+			
+				composite state Thermostat init TemprDecide {  // notice that we are not keeping history, we do not know whether to turn on or off
+					state TemprDecide {
+						transition -> TemprDecrease
+						guard lasttemp>=tmrature-delta  // We choose switch OFF as much as we can here
+						action do
+							request_actuator!SwitchOff(switch_id)
+						end
+						
+						transition -> TemprIncrease
+						guard lasttemp < tmrature-delta
+						action do
+							request_actuator!SwitchOn(switch_id)
+						end
+					}
+					
+					state TemprIncrease{ // Invariant: Switch is ON and temperature should increase					
+						transition -> TemprIncrease 
+						event temp:get_sensor?temperature
+						guard temp.id==thermo_id and temp.t<=tmrature+delta
+						action do
+							if (lasttemp>temp.t) request_actuator!SwitchOn(switch_id) // the temperature is still falling even though switch should be ON, reactivate
+							lasttemp = temp.t
+						end
+						
+						transition -> TemprDecrease
+						event temp2:get_sensor?temperature
+						guard temp2.id==thermo_id and temp2.t>tmrature+delta
+						action do
+							request_actuator!SwitchOff(switch_id)
+							lasttemp = temp2.t
+						end
+						
+						// Now the parameters that should not change the innermost state
+						transition -> TemprIncrease
+						event givedelta:human_input?set_delta
+						guard givedelta.rid==thermo_id
+						action do
+							delta = givedelta.dlta
+						end
+						transition -> TemprIncrease
+						event fetch:human_input?fetch_temp
+						guard fetch.rid==thermo_id
+						action do
+							// reporting the temperature value
+							human_output!temperature(thermo_id,"temperature ",lasttemp)
+						end
+	
+					}
+	
+					state TemprDecrease{ // Invariant: Switch is OFF and temperature should decrease					
+						transition-> TemprDecrease
+						event temp:get_sensor?temperature
+						guard temp.id==thermo_id and temp.t>=tmrature-delta
+						action do
+							// TRACING to follow thermostat print("TempDecrease: Observed=") print(temp.t) print(" Desired ") print(tmrature) print("\n") 
+							if (lasttemp<temp.t) request_actuator!SwitchOff(switch_id) // the temperature is still rising even though switch should be OFF, reactivate
+							lasttemp = temp.t
+						end
+						
+						transition -> TemprIncrease
+						event temp2:get_sensor?temperature
+						guard temp2.id==thermo_id and temp2.t<tmrature-delta
+						action do
+							request_actuator!SwitchOn(switch_id)
+							lasttemp = temp2.t
+						end
+						
+						// Now the parameters that should not change the innermost state
+						transition -> TemprIncrease
+						event givedelta:human_input?set_delta
+						guard givedelta.rid==thermo_id
+						action do
+							// just forward the polling interval instructions to the PSM
+							delta = givedelta.dlta
+						end
+						transition -> TemprDecrease
+						event fetch:human_input?fetch_temp
+						guard fetch.rid==thermo_id
+						action do
+							// reporting the temperature value
+							human_output!temperature(thermo_id,"temperature ",lasttemp)
+						end
+	
+					}
+	
+					
+					transition -> On
+					event swon:human_input?SwitchOn
+					guard swon.did==switch_id
+					action do
+						request_actuator!SwitchOn(swon.did)
+					end 
+					transition -> Off
+					event swoff:human_input?SwitchOff
+					guard swoff.did==switch_id
+					action do
+						request_actuator!SwitchOff(swoff.did)
+					end 
+					transition -> Thermostat
+					event set_temp:human_input?set_temperature
+					guard set_temp.rid==thermo_id
+					action do
+						tmrature = set_temp.t
+					end
+				} // end Thermostat
+				
+				state On {
+					transition -> Off
+					event swoff:human_input?SwitchOff
+					guard swoff.did==switch_id
+					action do
+						request_actuator!SwitchOff(swoff.did)
+					end 
+					transition -> On
+					event swon:human_input?SwitchOn
+					guard swon.did==switch_id
+					action do
+						request_actuator!SwitchOn(swon.did)
+					end
+					transition -> Thermostat
+					event set_temp:human_input?set_temperature
+					guard set_temp.rid==thermo_id
+					action do
+						tmrature = set_temp.t
+					end
+					transition -> On
+					event temp:get_sensor?temperature
+					guard temp.id==thermo_id
+					action do
+						if (lasttemp>temp.t) request_actuator!SwitchOn(switch_id) // temperature is falling even when ON. Reactivate.
+						lasttemp = temp.t
+					end
+				}
+				state Off {
+					transition -> Off
+					event swoff:human_input?SwitchOff
+					guard swoff.did==switch_id
+					action do
+						request_actuator!SwitchOff(swoff.did)
+					end 
+					transition -> On
+					event swon:human_input?SwitchOn
+					guard swon.did==switch_id
+					action do
+						request_actuator!SwitchOn(swon.did)
+					end
+					transition -> Thermostat
+					event set_temp:human_input?set_temperature
+					guard set_temp.rid==thermo_id
+					action do
+						tmrature = set_temp.t
+					end	
+					transition -> Off
+					event temp:get_sensor?temperature
+					guard temp.id==thermo_id
+					action do
+						if (lasttemp<temp.t) request_actuator!SwitchOff(switch_id) // temperature is rising even when OFF. Reactivate.
+						lasttemp = temp.t
+					end
+				}
+				
+				// Transitions of the composite state Running
+				transition -> Running
+				event givedelta:human_input?set_delta
+				guard givedelta.rid==thermo_id
+				action do
+					// just forward the polling interval instructions to the PSM
+					delta = givedelta.dlta
+				end
+				transition -> Running
+				event fetch:human_input?fetch_temp
+				guard fetch.rid==thermo_id
+				action do
+					// reporting the temperature value
+					human_output!temperature(thermo_id,"temperature ",lasttemp)
+				end
+				
+				// Messages that should not occur, but may occur
+				// Messages the cannot occur - since they are always handled
+				transition -> Running
+				event hion:human_input?SwitchOn
+				guard hion.did==switch_id
+				action do
+					human_output!prompt("INTERNAL ERROR: Impossible SwitchOn at PIM.Running")
+				end		
+				transition -> Running
+				event hioff:human_input?SwitchOff
+				guard hioff.did==switch_id
+				action do
+					human_output!prompt("INTERNAL ERROR: Impossible SwitchOff at PIM.Running")
+				end		
+				transition -> Running
+				event hist:human_input?set_temperature
+				guard hist.rid==thermo_id
+				action do
+					human_output!prompt("INTERNAL ERROR: Impossible set_temperature at PIM.Running")
+				end		
+				transition -> Running
+				event temp:get_sensor?temperature
+				guard temp.id==thermo_id
+				action do
+					human_output!prompt("INTERNAL ERROR: temperature received at PIM.Running")
+					lasttemp = temp.t
+				end
+				internal event get_sensor?iamalive1
+				action do 
+					human_output!prompt("INTERNAL ERROR: iamalive1 received at PIM.Running")
+				end
+				internal event get_sensor?iamalive2
+				action do 
+					human_output!prompt("INTERNAL ERROR: iamalive2 received at PIM.Running")
+				end
+			} // end Running
+		} // end session new_room
+	} // end PIM_behavior
+} // end PIM thing
+
