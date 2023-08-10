@@ -16,9 +16,9 @@ protocol MQTT @serializer "JSON"
   @mqtt_subscribe_topic "CPS2021/tempoutput";
 
 
-thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
-	required port to_pim {sends temperature, heatOn, heatOff, set_temperature, set_delta, fetch_temp, set_night_start, set_day_start, set_luminance}
-	provided port from_pim {receives add_thermometer, add_device, SwitchOn, SwitchOff, prompt}
+thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg, LuminanceMsg {
+	required port to_pim {sends luminance, temperature, heatOn, heatOff, set_temperature, set_delta, fetch_temp, set_night_start, set_day_start, set_luminance}
+	provided port from_pim {receives add_lightsensor, add_thermometer, add_device, SwitchOn, SwitchOff, prompt}
 	
 	required port to_frz {sends temperature}
 	provided port from_frz {receives temperature, prompt, SwitchOn, SwitchOff}
@@ -67,7 +67,8 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				end
 				if (found) do
 					thermoval[i-1]=put_t.t
-					to_pim!temperature(id_s,thermotext[i],put_t.t)				
+					to_pim!temperature(id_s,thermotext[i],put_t.t)
+					to_frz!temperature(id_s,thermotext[i],put_t.t)				
 				end
 			end
 						

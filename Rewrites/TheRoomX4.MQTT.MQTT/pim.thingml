@@ -8,7 +8,7 @@ import "psm.thingml"
 import "pim_messages.thingml"
 import "timer.thingml"
 
-thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
+thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs, LuminanceMsg {
 	required port to_psm {
 		sends add_thermometer, add_device, SwitchOn, SwitchOff, prompt
 	}
@@ -63,7 +63,7 @@ thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 				transition -> SetThermostat
 				event from_psm?heatOff
 				action do
-					human_output!prompt("Please set temperature for Thermostat")
+					to_psm!prompt("Please set temperature for Thermostat")
 				end			
 			}
 			
@@ -85,7 +85,7 @@ thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 			internal event fetch:from_psm?fetch_temp
 			action do
 				// reporting the temperature value
-				to_psm!temperature(thermo_id,"temperature ",lasttemp)
+				to_psm!prompt("Temperature: " + lasttemp)
 			end
 			internal event temp:from_psm?temperature
 			action do 
@@ -155,7 +155,7 @@ thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 					event fetch:from_psm?fetch_temp
 					action do
 						// reporting the temperature value
-						to_psm!temperature(thermo_id,"temperature ",lasttemp)
+						to_psm!prompt("Temperature: " + lasttemp)
 					end
 
 				}
@@ -169,7 +169,7 @@ thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 					guard temp.t>=tmrature-delta
 					action do
 						// TRACING to follow thermostat print("TempDecrease: Observed=") print(temp.t) print(" Desired ") print(tmrature) print("\n") 
-						if (lasttemp<temp.t) request_actuator!SwitchOff(switch_id) // the temperature is still rising even though switch should be OFF, reactivate
+						if (lasttemp<temp.t) to_psm!SwitchOff(switch_id) // the temperature is still rising even though switch should be OFF, reactivate
 						lasttemp = temp.t
 					end
 					
@@ -240,7 +240,7 @@ thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 				transition -> On
 				event temp:from_psm?temperature
 				action do
-					if (lasttemp>temp.t) request_actuator!SwitchOn(switch_id) // temperature is falling even when ON. Reactivate.
+					if (lasttemp>temp.t) to_psm!SwitchOn(switch_id) // temperature is falling even when ON. Reactivate.
 					lasttemp = temp.t
 				end
 			}
@@ -317,7 +317,7 @@ thing FreezeProtect includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 	}
 
 	required port to_psm {
-		sends temperature, prompt, SwitchOn, SwitchOff
+		sends prompt, SwitchOn
 	}
 
 	property switch_id:Integer = 1 // the single on-off switch identifier
@@ -348,11 +348,11 @@ thing FreezeProtect includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
 					to_psm!prompt("Freeze WARNING: Temperature is now above warning level: "+tmp.t)
 				end
 				transition -> FreezeWarning
-				event tmp:to_psm?temperature
+				event tmp:from_psm?temperature
 				guard tmp.t>freeze_critical_temp
 					// Just discard, we are still in Warning range
 				transition -> FreezeEmergency
-				event tmp:to_psm?temperature
+				event tmp:from_psm?temperature
 				guard tmp.t<=freeze_critical_temp
 				action do
 					to_psm!SwitchOn(switch_id)
