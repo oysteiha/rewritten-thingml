@@ -4,8 +4,8 @@ import "datatypes.thingml" from stl
 
 // General
 thing fragment GeneralMsg {
-	message iamalive1()
-	message iamalive2()
+	message heatOff()
+	message heatOn()
 	message prompt(txt:String) // meant to send a textual message out to the user
 }
 

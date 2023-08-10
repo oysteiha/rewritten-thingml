@@ -8,21 +8,24 @@
 import "datatypes.thingml" from stl	
 import "pim_messages.thingml"
 
-/*
+
 protocol MQTT @serializer "JSON"
   @mqtt_broker_address "localhost"
   @mqtt_broker_port "1883" 
   @mqtt_publish_topic "CPS2021/SwitchControl"
   @mqtt_subscribe_topic "CPS2021/tempoutput";
- */
+
 
 thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
-	required port provide_temp {sends temperature, iamalive1, iamalive2}
-	provided port require_val {receives add_thermometer, add_device, SwitchOn, SwitchOff, iamalive1, iamalive2}
+	required port to_pim {sends temperature, heatOn, heatOff, set_temperature, set_delta, fetch_temp, set_night_start, set_day_start, set_luminance}
+	provided port from_pim {receives add_thermometer, add_device, SwitchOn, SwitchOff, prompt}
 	
+	required port to_frz {sends temperature}
+	provided port from_frz {receives temperature, prompt, SwitchOn, SwitchOff}
+
 	//Only one MQTT port to receive the sensor values
 	provided port MQTT {
-		receives temperature
+		receives luminance, temperature, heatOn, heatOff, set_temperature, set_delta, fetch_temp, set_day_start, set_night_start, set_luminance
 		sends SwitchOn,SwitchOff
 	}
 
@@ -48,27 +51,8 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 	property last_onoff:Integer = 0 // number of onoff switches in the set 		
 	property did:Integer // temporary device id
 	
-	statechart behaviorMQTTDriver init Alive1 {
-			state Alive1 {
-				on entry do
-					provide_temp!iamalive1() // making sure that all processes are alive before starting
-				end
-				transition -> Alive2
-				event alv:require_val?iamalive1
-				action do
-					provide_temp!iamalive2()
-				end				
-				transition -> Idle
-				event alv:require_val?iamalive2
-				action do
-					provide_temp!iamalive2()
-				end				
-			}	
-			state Alive2{
-				transition -> Idle	
-				event alv:require_val?iamalive2 
-			}
-		state Idle {
+	statechart behaviorMQTTDriver init Idle {
+		state Idle{
 			transition -> Idle
 			event put_t:MQTT?temperature
 			action do
@@ -83,12 +67,12 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				end
 				if (found) do
 					thermoval[i-1]=put_t.t
-					provide_temp!temperature(id_s,thermotext[i],put_t.t)				
+					to_pim!temperature(id_s,thermotext[i],put_t.t)				
 				end
 			end
 						
 			transition -> Idle
-			event addt:require_val?add_thermometer
+			event addt:from_pim?add_thermometer
 			action do				
 				id_s=addt.id
 				thermometers[last_thermo]=id_s
@@ -96,9 +80,9 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				thermoval[last_thermo]= 20 // just a default temperature
 				last_thermo = last_thermo+1
 			end
-			
+
 			transition -> Idle
-			event add_dev: require_val?add_device
+			event add_dev: from_pim?add_device
 			action do
 				did=add_dev.did
 				
@@ -106,7 +90,7 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				last_onoff = last_onoff+1
 			end
 			transition -> Idle
-			event swon: require_val?SwitchOn
+			event swon: from_pim?SwitchOn
 			action do
 				did=swon.did
 				i=0
@@ -122,7 +106,7 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 				end
 			end
 			transition -> Idle
-			event swoff: require_val?SwitchOff
+			event swoff: from_pim?SwitchOff
 			action do
 				did=swoff.did
 				i=0
@@ -137,7 +121,105 @@ thing MQTTDriver includes TemperatureMsg, OnOffMsg, GeneralMsg {
 					MQTT!SwitchOff(did)
 				end
 			end			
+			transition -> Idle
+			event hon: MQTT?heatOn
+			action do
+				did=hon.did
+				i=0
+				found = false
+				while (i<last_onoff and (not found)) do
+					if (did==onoffswitches[i]) do
+						found=true // trick to terminate while loop
+					end
+					i=i+1
+				end
+				if (found) do
+					to_pim!heatOn(did)
+				end
+			end
+			transition -> Idle
+			event hoff: MQTT?heatOff
+			action do
+				did=hoff.did
+				i=0
+				found = false
+				while (i<last_onoff and (not found)) do
+					if (did==onoffswitches[i]) do
+						found=true // trick to terminate while loop
+					end
+					i=i+1
+				end
+				if (found) do
+					to_pim!heatOff(did)
+				end
+			end	
+			transition -> Idle
+			event pr: from_pim?prompt
+			action do
+				println(pr.txt)
+			end		
+			transition -> Idle
+			event st: MQTT?set_temperature
+			action do
+				to_pim!set_temperature(st.t)
+			end		
+			transition -> Idle
+			event givdlt: MQTT?set_delta
+			action do
+				to_pim!set_delta(givdlt.dlta)
+			end		
+			transition -> Idle
+			event ft: MQTT?fetch_temp
+			action do
+				to_pim!fetch_temp()
+			end		
+			
+			transition -> Idle
+			event addlum:from_pim?add_lightsensor
+			action do				
+				id_s=addlum.id
+				lightsensors[last_light]= id_s // default luminance level
+				lightval[last_light] = 50
+				last_light = last_light+1
+			end
+
+			transition -> Idle
+			event put_lum:MQTT?luminance
+			action do
+				id_s=put_lum.id
+				
+				i=0
+				foundL = false
+				while (i<last_light and (not foundL)) do
+					if(id_s==lightsensors[i]) do
+						foundL = true //Terminates loop
+					end
+					i=i+1
+				end
+				if (foundL) do
+					lightval[i-1]=put_lum.lum
+					to_pim!luminance(id_s, put_lum.lum)
+				end
+			end
+			
+			transition -> Idle
+			event evn: MQTT?set_day_start
+			action do
+				to_pim!set_day_start(evn.time)
+			end	
+			
+			transition -> Idle
+			event evnt: MQTT?set_night_start
+			action do
+				to_pim!set_night_start(evnt.time)
+			end	
+			
+			transition -> Idle
+			event evnt: MQTT?set_luminance
+			action do
+				to_pim!set_luminance(evnt.lum)
+			end				
 		}
 	}
-} // MQTTDriver
+ }// MQTTDriver
 
