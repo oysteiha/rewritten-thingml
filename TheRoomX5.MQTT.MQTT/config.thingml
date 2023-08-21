@@ -1,0 +1,35 @@
+import "psm.thingml"
+import "pim.thingml"
+import "javatimer.thingml"
+
+configuration X5_MQTT_SIM {
+	instance T1:MQTTDriver
+	instance th:ThermoCtrl
+	instance g_temp:TimerJava
+	instance g_humn:TimerJava
+	instance frz : FreezeProtect
+	instance fire: FireProtect
+	instance swt:TimerJava
+
+
+	// PSM
+	connector T1.to_pim => th.from_psm
+			
+	// PIM outwards 
+	connector th.to_psm => T1.from_pim
+	
+	connector th.guard_temperature =>g_temp.timer
+	connector th.guard_human => g_humn.timer
+	
+	// Freeze protect
+	connector T1.to_frz => frz.from_psm
+	connector frz.to_psm => T1.from_frz
+
+	// Fire protect
+	connector fire.to_psm => T1.from_pim
+	connector fire.guard_timr => swt.timer
+	
+	// Simulation
+	connector T1.MQTT over MQTT	
+
+}

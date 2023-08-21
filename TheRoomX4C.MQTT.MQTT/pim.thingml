@@ -1,0 +1,508 @@
+/* X3D is based on X3B introducing delta termperature and improved entry to Thermostat This is MQTT with java swing interface*/
+/* This version is for simulation via MQTT or via human interface */
+// Base datatypes
+import "datatypes.thingml" from stl
+
+/* PSM must be included */
+import "psm.thingml"
+import "pim_messages.thingml"
+import "timer.thingml"
+
+thing ThermoCtrl includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs, LuminanceMsg {
+	required port to_psm {
+		sends add_thermometer, add_device, SwitchOn, SwitchOff, prompt
+	}
+	provided port from_psm {
+		receives heatOn, heatOff, set_temperature, set_delta, temperature, fetch_temp, set_day_start, set_night_start, set_luminance
+	}
+
+	
+
+	//timer ports - it does not hold to include TimerClient since it only has one port and therefore cannot distinguish between two timers
+	required port guard_temperature
+    {
+		receives timer_timeout
+		sends timer_start, timer_cancel
+	}
+    
+	required port guard_human
+    {
+		receives timer_timeout
+		sends timer_start, timer_cancel
+	}
+    
+	
+	
+	property tmrature:Double = 20 // the requested temperature for the room
+	property thermo_id:Integer = 1 // the single thermometer identifier
+	property switch_id:Integer = 1 // the single on-off switch identifier
+	property delta:Double = 0.10 // the maximum allowed difference from the comfort temperature
+	
+	property lasttemp:Double = 0 // the last temperature recorded, buffering one measurement
+	
+	statechart ThermoCtrl_behavior init Build {
+		on entry do
+			print("Running The Room X4C.MQTT.sim\n")
+		end
+		
+		composite state Build init SetThermostat keeps history {
+		on entry guard_human!timer_start(30000) // 30s to start the thermostat 
+		on exit guard_human!timer_cancel()
+
+			state SetThermostat {
+				on entry do
+					to_psm!add_thermometer(thermo_id,"t") // We have only one thermometer in this system
+					to_psm!add_device(switch_id) // We have only one switch device in this system
+				end
+				// Here the only message we want is the set_temperature, but this is on one level up to move to Running
+				transition -> SetThermostat
+				event from_psm?heatOn
+				action do
+					to_psm!prompt("Please set temperature for Thermostat")
+				end			
+				transition -> SetThermostat
+				event from_psm?heatOff
+				action do
+					to_psm!prompt("Please set temperature for Thermostat")
+				end			
+			}
+			
+			// Normal transition to the Running state
+			transition -> Running
+			event set_temp:from_psm?set_temperature
+			action do
+				tmrature = set_temp.t
+				to_psm!prompt("Now entering thermostat. Please give temperature observations") // SIMULATION: prompting on console for the user to react properly
+			end
+			
+			//Escape situations
+			// transition -> Build (This was the construction in X2D)
+			// Now the parameters that should not change the innermost state
+			internal event givedelta:from_psm?set_delta
+			action do
+				delta = givedelta.dlta
+			end
+			internal event fetch:from_psm?fetch_temp
+			action do
+				// reporting the temperature value
+				to_psm!prompt("Temperature: " + lasttemp)
+			end
+			internal event temp:from_psm?temperature
+			action do 
+				// just record, the thermostat is not running, yet 
+				lasttemp = temp.t
+			end
+				
+			transition -> Build
+			event tmout:guard_human?timer_timeout
+			action do
+				to_psm!prompt("Please continue doing the build of the temperature control")
+			end
+			
+		} // end Build
+		
+		composite state Running init Thermostat keeps history {
+		
+		
+			composite state Thermostat init TemprDecide {  // notice that we are not keeping history, we do not know whether to turn on or off
+				state TemprDecide {
+					transition -> TemprDecrease
+					guard lasttemp>=tmrature-delta  // We choose switch OFF as much as we can here
+					action do
+						to_psm!SwitchOff(switch_id)
+					end
+					
+					transition -> TemprIncrease
+					guard lasttemp < tmrature-delta
+					action do
+						to_psm!SwitchOn(switch_id)
+					end
+				}
+				
+				state TemprIncrease{ // Invariant: Switch is ON and temperature should increase
+				on entry guard_temperature!timer_start(65000)
+				on exit guard_temperature!timer_cancel()
+				
+					transition -> TemprIncrease 
+					event temp:from_psm?temperature
+					guard temp.t<=tmrature+delta
+					action do
+						if (lasttemp>temp.t) to_psm!SwitchOn(switch_id) // the temperature is still falling even though switch should be ON, reactivate
+						lasttemp = temp.t
+					end
+					
+					transition -> TemprDecrease
+					event temp2:from_psm?temperature
+					guard temp2.t>tmrature+delta
+					action do
+						to_psm!SwitchOff(switch_id)
+						lasttemp = temp2.t
+					end
+					
+					transition -> TemprIncrease
+					event timout:guard_temperature?timer_timeout
+					action do
+						to_psm!prompt("WARNING: @TemprIncrease - temperature measurement is delayed")						
+					end
+					
+					// Now the parameters that should not change the innermost state
+					transition -> TemprIncrease
+					event givedelta:from_psm?set_delta
+					action do
+						delta = givedelta.dlta
+					end
+					transition -> TemprIncrease
+					event fetch:from_psm?fetch_temp
+					action do
+						// reporting the temperature value
+						to_psm!prompt("Temperature: " + lasttemp)
+					end
+
+				}
+
+				state TemprDecrease{ // Invariant: Switch is OFF and temperature should decrease
+				on entry guard_temperature!timer_start(65000) 
+				on exit guard_temperature!timer_cancel()
+				
+					transition-> TemprDecrease
+					event temp:from_psm?temperature
+					guard temp.t>=tmrature-delta
+					action do
+						// TRACING to follow thermostat print("TempDecrease: Observed=") print(temp.t) print(" Desired ") print(tmrature) print("\n") 
+						if (lasttemp<temp.t) to_psm!SwitchOff(switch_id) // the temperature is still rising even though switch should be OFF, reactivate
+						lasttemp = temp.t
+					end
+					
+					transition -> TemprIncrease
+					event temp2:from_psm?temperature
+					guard temp2.t<tmrature-delta
+					action do
+						to_psm!SwitchOn(switch_id)
+						lasttemp = temp2.t
+					end
+					
+					transition -> TemprDecrease
+					event timout:guard_temperature?timer_timeout
+					action do
+						to_psm!prompt("WARNING: @TemprDecrease - temperature measurement is delayed")
+					end
+
+					// Now the parameters that should not change the innermost state
+					transition -> TemprIncrease
+					event givedelta:from_psm?set_delta
+					action do
+						// just forward the polling interval instructions to the PSM
+						delta = givedelta.dlta
+					end
+					transition -> TemprDecrease
+					event fetch:from_psm?fetch_temp
+					action do
+						// reporting the temperature value
+						to_psm!prompt("Temperature: " + lasttemp)
+					end
+
+				}
+
+				
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end 
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end
+			} // end Thermostat
+			
+			state On {
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end
+				transition -> On
+				event temp:from_psm?temperature
+				action do
+					if (lasttemp>temp.t) to_psm!SwitchOn(switch_id) // temperature is falling even when ON. Reactivate.
+					lasttemp = temp.t
+				end
+			}
+			state Off {
+				transition -> Off
+				event swoff:from_psm?heatOff
+				action do
+					to_psm!SwitchOff(swoff.did)
+				end 
+				transition -> On
+				event swon:from_psm?heatOn
+				action do
+					to_psm!SwitchOn(swon.did)
+				end
+				transition -> Thermostat
+				event set_temp:from_psm?set_temperature
+				action do
+					tmrature = set_temp.t
+				end	
+				transition -> Off
+				event temp:from_psm?temperature
+				action do
+					if (lasttemp<temp.t) to_psm!SwitchOff(switch_id) // temperature is rising even when OFF. Reactivate.
+					lasttemp = temp.t
+				end
+			}
+			
+			// Transitions of the composite state Running
+			transition -> Running
+			event givedelta:from_psm?set_delta
+			action do
+				// just forward the polling interval instructions to the PSM
+				delta = givedelta.dlta
+			end
+			transition -> Running
+			event fetch:from_psm?fetch_temp
+			action do
+				// reporting the temperature value
+				to_psm!prompt("Temperature: "+lasttemp)
+			end
+			
+			// Messages that should not occur, but may occur
+			// Messages the cannot occur - since they are always handled
+			transition -> Running
+			event from_psm?heatOn
+			action do
+				to_psm!prompt("INTERNAL ERROR: Impossible SwitchOn at PIM.Running")
+			end		
+			transition -> Running
+			event from_psm?heatOff
+			action do
+				to_psm!prompt("INTERNAL ERROR: Impossible SwitchOff at PIM.Running")
+			end		
+			transition -> Running
+			event from_psm?set_temperature
+			action do
+				to_psm!prompt("INTERNAL ERROR: Impossible set_temperature at PIM.Running")
+			end		
+			transition -> Running
+			event temp:from_psm?temperature
+			action do
+				to_psm!prompt("INTERNAL ERROR: temperature received at PIM.Running")
+				lasttemp = temp.t
+			end
+			
+		} // end Running
+	} // end ThermoCtrl_behavior
+} // endT hermoCtrl thing
+
+thing FreezeProtect includes GeneralMsg, TemperatureMsg, OnOffMsg, TimerMsgs {
+
+	provided port from_psm {
+		receives temperature
+	}
+
+	required port to_psm {
+		sends prompt, SwitchOn
+	}
+
+	property switch_id:Integer = 1 // the single on-off switch identifier
+	property lasttemp: Double // the most recent temperature recorded before this in Emergency situation
+	property freeze_warning_temp:Double = 9 // the temperature when heating is forced
+	property freeze_critical_temp:Double = 6 // the temperature when an emergency message is sent to Human
+	
+	statechart FreezeProtect_behavior init Monitoring {
+		composite state Monitoring init ObserveTemp keeps history {
+			state ObserveTemp {
+				transition -> FreezeWarning
+				event tmp:from_psm?temperature
+				guard tmp.t<freeze_warning_temp
+				action do
+					to_psm!SwitchOn(switch_id) 
+					to_psm!prompt("Freeze WARNING: Temperature is now below warning level:"+tmp.t)
+				end
+				transition -> ObserveTemp
+				event tmp:from_psm?temperature
+				guard tmp.t>=freeze_warning_temp
+					// Just discard, everything is normal
+			}
+			state FreezeWarning {
+				transition -> ObserveTemp
+				event tmp:from_psm?temperature
+				guard tmp.t>freeze_warning_temp+3 // We give a little delta here with 3
+				action do
+					to_psm!prompt("Freeze WARNING: Temperature is now above warning level: "+tmp.t)
+				end
+				transition -> FreezeWarning
+				event tmp:from_psm?temperature
+				guard tmp.t>freeze_critical_temp
+					// Just discard, we are still in Warning range
+				transition -> FreezeEmergency
+				event tmp:from_psm?temperature
+				guard tmp.t<=freeze_critical_temp
+				action do
+					to_psm!SwitchOn(switch_id)
+					to_psm!prompt("Freeze EMERGENCY: Very low temperature: "+tmp.t)
+					lasttemp = tmp.t
+				end
+			}
+			state FreezeEmergency {
+				transition -> FreezeEmergency
+				event tmp:from_psm?temperature
+				guard tmp.t < freeze_critical_temp
+				action do
+					if (lasttemp>tmp.t)
+					do 
+						to_psm!prompt("Freeze EMERGENCY: Temperature falling: "+tmp.t)
+					end
+					else
+					do
+						to_psm!prompt("Freeze EMERGENCY: Temperature critical: "+tmp.t)
+					end
+					to_psm!SwitchOn(switch_id)
+					lasttemp=tmp.t
+				end
+				transition -> FreezeWarning
+				event tmp:from_psm?temperature
+				guard tmp.t < freeze_warning_temp and tmp.t >= freeze_critical_temp
+				action do
+					to_psm!SwitchOn(switch_id)
+					to_psm!prompt("Freeze WARNING: Temperature rising, still low: "+tmp.t)
+					lasttemp=tmp.t
+				end
+				transition -> ObserveTemp
+				event tmp:from_psm?temperature
+				guard tmp.t>= freeze_warning_temp
+				action
+					to_psm!prompt("Freeze WARNING overcome, temperature is above warning level: "+tmp.t)
+			}
+		}
+	}
+} // end FreezeProtect
+
+thing FireProtect includes GeneralMsg, OnOffMsg, TimerMsgs {
+
+	provided port from_psm {
+		receives heatOn, heatOff, add_device
+	}
+	required port to_psm {
+		sends SwitchOn, SwitchOff, add_device, prompt
+	}
+	
+	required port guard_timr
+    {
+		receives timer_timeout
+		sends timer_start, timer_cancel
+	}
+
+	
+
+	property switch_id:Integer = 1 
+	property max_duration:Long = 60000 // The maximum duration that the heater can be on before forced to turn off
+	property off_duration:Long = 10000 // The duration that the heater is forced to be off
+	property on_when_returning:Boolean = true // Flag to show whether switch should be on when returning from OFF
+		
+	statechart FireProtect_behavior init Init {
+		state Init { // Here the device_id is known, we need to set ON or OFF
+			internal event addd:from_psm?add_device
+			action do
+				to_psm!add_device(addd.did)
+			end
+			transition -> ON
+			event turnon:from_psm?heatOn
+			action do
+				to_psm!SwitchOn(turnon.did)
+				on_when_returning = true
+			end
+			
+			transition -> OFF
+			event turnoff:from_psm?heatOff
+			action do
+				to_psm!SwitchOff(turnoff.did)
+				on_when_returning = false
+			end
+		}
+		state ON { // Invariant: The heater is ON but should not be ON longer than max_duration
+		on entry do
+			guard_timr!timer_start(max_duration)
+			on_when_returning = true
+		end
+		on exit guard_timr!timer_cancel()
+			internal event turnon:from_psm?heatOn
+			action do
+				to_psm!SwitchOn(turnon.did)
+				on_when_returning = true
+			end
+			transition -> COOLING 
+			event turnoff:from_psm?SwitchOff
+			action do
+				to_psm!SwitchOff(turnoff.did)
+				on_when_returning = false
+			end
+			transition -> COOLING
+			event timout:guard_timr?timer_timeout
+			action do
+				// turn the heater off for fire protection
+				to_psm!SwitchOff(switch_id)
+				to_psm!prompt("FireProtection: Turning off the heater for a period")
+				on_when_returning = true
+			end
+			internal event from_psm?add_device
+			action to_psm!prompt("IERROR in FireProtection: add_device at improper place ON")
+		}
+		state COOLING { // Invariant: The heater is turned off from ON and needs to be off at least off_duration
+		on entry guard_timr!timer_start(off_duration)
+		on exit guard_timr!timer_cancel()
+			internal event from_psm?heatOn
+			action do
+				on_when_returning = true
+			end
+			
+			internal event from_psm?SwitchOff
+			action do
+				on_when_returning = false
+			end
+			
+			transition -> ON
+			event guard_timr?timer_timeout
+			guard on_when_returning
+			action do
+				to_psm!prompt("FireProtection: Heater enabled, set to ON")
+				to_psm!SwitchOn(switch_id)
+			end
+			transition -> OFF
+			event guard_timr?timer_timeout
+			guard not on_when_returning
+			action do
+				to_psm!prompt("FireProtection: Heater enabled, set to OFF")
+			end
+			internal event from_psm?add_device
+			action to_psm!prompt("IERROR in FireProtection: add_device at improper place COOLING")
+		}
+		state OFF { // Invariant: The heater is off from COOLING, and can be turned on at will
+			transition -> ON
+			event turnon:from_psm?heatOn
+			action to_psm!SwitchOn(turnon.did)
+			internal event turnoff:from_psm?SwitchOff
+			action to_psm!SwitchOff(turnoff.did)
+			internal event from_psm?add_device
+			action to_psm!prompt("IERRO in FireProtection: add_device at improper place OFF")
+		}
+	} // end FireProtect_behavior
+
+} // end FireProtect
+

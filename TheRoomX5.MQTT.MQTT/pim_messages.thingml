@@ -4,19 +4,18 @@ import "datatypes.thingml" from stl
 
 // General
 thing fragment GeneralMsg {
-	message iamalive1()
-	message iamalive2()
-	message add_room(rname:String) // rid is the room identifier, rname the room name
 	message prompt(txt:String) // meant to send a textual message out to the user
+	message heatOn(did:Integer) // Human turns on heat permanently
+	message heatOff(did:Integer) // Human turns off heat permanently
 }
 
 //Temperature
 thing fragment TemperatureMsg {
     message temperature(id:Integer, txt:String, t : Double);
     message add_thermometer(id:Integer,txt:String);
-    message set_temperature(rid:Integer,t:Double);
-    message set_delta(rid:Integer,dlta:Double) // how close the temperature must be to the comfort temperature
-    message fetch_temp(rid:Integer) // asking for the (room) temperature, return will be on human output
+    message set_temperature(t:Double);
+	message set_delta(dlta:Double)
+	message fetch_temp() // asking for the (single) temperature, return will be on human output
 }
 
 //Luminance
@@ -24,6 +23,8 @@ thing fragment LuminanceMsg {
     message luminance(id:Integer,lum : Double); //luminance
     message add_lightsensor(id:Integer);
     message set_luminance(lum:Double); // for setting the threshold
+	message set_day_start(time:Integer)
+    message set_night_start(time:Integer)
 }
 
 //Motion
