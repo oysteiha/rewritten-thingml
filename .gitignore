@@ -1,0 +1,5 @@
+thingml-gen/*
+*
+!.gitignore
+!/**/*.thingml
+*merged.thingml
